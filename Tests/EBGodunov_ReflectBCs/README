@@ -1,0 +1,18 @@
+Unit test for the reflecting boundary conditions in EBGodunovBC::Set{X,Y,Z}BCs
+(EBGodunov/hydro_ebgodunov_bcs_K.H).
+
+Those functions fill the pair of extrapolated face states (lo,hi) at faces on
+and beyond a domain boundary. For reflect_even and reflect_odd the fill beyond
+the face is a mirror of interior face states, and this test checks that mirror
+against an independent construction: a 1-D cell field whose ghost cells are
+filled the way AMReX fills a reflecting BC, from which the face states follow
+by direct PLM reconstruction. The two must agree to round-off at every face the
+EBGodunov kernels touch, in all directions and for both parities.
+
+The kernel under test is header-only, so this links only AMReX Base -- none of
+the rest of AMReX-Hydro is built.
+
+  make -j4           # DIM = 3 by default; make DIM=2 also works
+  ./main3d.gnu.TEST.ex
+
+It prints one line and exits non-zero if any check fails.
