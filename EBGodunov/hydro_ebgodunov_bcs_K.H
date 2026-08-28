@@ -20,11 +20,51 @@
    3D EBGodunov ExtrapVel.
 */
 
+/*
+   Conventions used below.
+
+   The functions take the pair of face-based states (lo,hi) at face (i,j,k) in
+   the direction of interest, where "lo" is extrapolated from the cell on the
+   low side of the face and "hi" from the cell on the high side.  They are
+   passed as references and modified in place.
+
+   In addition they take the two face-based arrays holding those states for the
+   whole box, so that reflecting boundary conditions can be filled beyond the
+   domain face by mirroring interior values.  Using the x-direction as the
+   example, with the PLM arrays Ipx/Imx produced by (EB)PLM::PredictVelOnXFace,
+   the state pair at face I is
+
+       lo = Ip(I-1,j,k,n)      hi = Im(I  ,j,k,n)
+
+   so Ip and Im are exactly the arrays the caller already reads to form lo,hi.
+
+   Reflection about the low domain face (face index domlo) maps face I to face
+   2*domlo-I and exchanges the two sides of the face, hence
+
+       lo(I) =  hi(2*domlo-I) =  Im(2*domlo-I  ,j,k,n)
+       hi(I) =  lo(2*domlo-I) =  Ip(2*domlo-I-1,j,k,n)
+
+   (with an overall sign flip for reflect_odd), and similarly about the high
+   domain face (face index domhi+1) with the mirror index 2*(domhi+1)-I.  On the
+   reflecting face itself the mirror index is the face itself, so symmetry
+   simply requires lo == hi; there we keep the state extrapolated from the
+   interior cell (lo = hi at domlo, hi = lo at domhi+1), which is the behaviour
+   used everywhere else in AMReX-Hydro.
+
+   IMPORTANT: Ip and Im must still hold the extrapolated (PLM) states when these
+   functions are called.  In EBGodunov::ExtrapVelToFacesOnBox the upwinded
+   intermediate edge state used to be written back into Imx/Imy/Imz from within
+   the same kernel launch, which made the mirrored reads above racy; it is now
+   written to its own xedge/yedge/zedge arrays.  Do not reintroduce that reuse.
+*/
+
 namespace EBGodunovBC {
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 void SetXBCs (const int i, const int j, const int k, const int n,
               const amrex::Array4<const amrex::Real> &s,
+              const amrex::Array4<const amrex::Real> &Ip,
+              const amrex::Array4<const amrex::Real> &Im,
               amrex::Real &lo, amrex::Real &hi,
               amrex::Real velm, amrex::Real velp,
               const int bclo, const int bchi,
@@ -57,34 +97,33 @@ void SetXBCs (const int i, const int j, const int k, const int n,
                  (bclo == BCType::direction_dependent && velp < 0.0) )
         {
             lo = hi;
-        } else if (bclo == BCType::reflect_even)
+        }
+        else if (bclo == BCType::reflect_even)
         {
-            lo = hi;
-
-            if ( i<domlo)
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_even BC. See comments in EBGodunovBC::SetBCs.");
-            //
-            // Note that this is only relevant for 3D, as only 3D ever needs to
-            // set the BC beyond the domain face.
-            // This is potentially tricky because the code reuses some of the
-            // space holding the holding the states passed in here; it puts the
-            // upwinded intermediate edge state in Imx (which supplies hi)
-            // With GPU, I think it's undertermined which Imx(i+..) you'll get here,
-            // could be from PLM, could be the upwinded edgestate.
-            // Question is whether every thread in the stream has to finish a kernel
-            // before the next kernel is launched.
-            // lo = hi_arr(2*domlo-i  ,j,k,n);
-            // hi = lo_arr(2*domlo-i-1,j,k,n);
+            if ( i == domlo )
+            {
+                // Mirror of the face is the face itself; symmetry gives lo==hi.
+                lo = hi;
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                lo =  Im(2*domlo-i  ,j,k,n);
+                hi =  Ip(2*domlo-i-1,j,k,n);
+            }
         }
         else if (bclo == BCType::reflect_odd)
         {
-            if ( i==domlo ) {
+            if ( i == domlo )
+            {
                 hi = Real(0.);
                 lo = Real(0.);
-            } else {
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_odd BC. See comments in EBGodunovBC::SetBCs.");
-            //     lo = -hi_arr(2*domlo-i  ,j,k,n);
-            //     hi = -lo_arr(2*domlo-i-1,j,k,n);
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                lo = -Im(2*domlo-i  ,j,k,n);
+                hi = -Ip(2*domlo-i-1,j,k,n);
             }
         }
     }
@@ -110,23 +149,29 @@ void SetXBCs (const int i, const int j, const int k, const int n,
         }
         else if (bchi == BCType::reflect_even)
         {
-            hi = lo;
-
-            if ( i>domhi+1 )
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_even BC. See comments in EBGodunovBC::SetBCs.");
-            // hi = lo_arr(2*(domhi+1)-i-1,j,k,n);
-            // lo = hi_arr(2*(domhi+1)-i  ,j,k,n);
+            if ( i == domhi+1 )
+            {
+                hi = lo;
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                hi =  Ip(2*(domhi+1)-i-1,j,k,n);
+                lo =  Im(2*(domhi+1)-i  ,j,k,n);
+            }
         }
         else if (bchi == BCType::reflect_odd)
         {
-            if ( i==domhi+1 ) {
+            if ( i == domhi+1 )
+            {
                 hi = Real(0.);
                 lo = Real(0.);
-            } else {
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_odd BC. See comments in EBGodunovBC::SetBCs.");
-            // hi = lo_arr(2*(domhi+1)-i-1,j,k,n);
-            //     hi = -lo_arr(2*(domhi+1)-i-1,j,k,n);
-            //     lo = -hi_arr(2*(domhi+1)-i  ,j,k,n);
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                hi = -Ip(2*(domhi+1)-i-1,j,k,n);
+                lo = -Im(2*(domhi+1)-i  ,j,k,n);
             }
         }
     }
@@ -137,6 +182,8 @@ void SetXBCs (const int i, const int j, const int k, const int n,
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 void SetYBCs (const int i, const int j, const int k, const int n,
               const amrex::Array4<const amrex::Real> &s,
+              const amrex::Array4<const amrex::Real> &Ip,
+              const amrex::Array4<const amrex::Real> &Im,
               amrex::Real &lo, amrex::Real &hi,
               amrex::Real velm, amrex::Real velp,
               const int bclo, const int bchi,
@@ -168,22 +215,29 @@ void SetYBCs (const int i, const int j, const int k, const int n,
         }
         else if (bclo == BCType::reflect_even)
         {
-            lo = hi;
-
-            if  ( j<domlo )
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_even BC. See comments in EBGodunovBC::SetBCs.");
-            // lo = hi_arr(i,2*domlo-j  ,k,n);
-            // hi = lo_arr(i,2*domlo-j-1,k,n);
+            if ( j == domlo )
+            {
+                lo = hi;
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                lo =  Im(i,2*domlo-j  ,k,n);
+                hi =  Ip(i,2*domlo-j-1,k,n);
+            }
         }
         else if(bclo == BCType::reflect_odd)
         {
-            if ( j==domlo ) {
+            if ( j == domlo )
+            {
                 hi = Real(0.);
                 lo = Real(0.);
-            } else {
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_odd BC. See comments in EBGodunovBC::SetBCs.");
-            //     lo = -hi_arr(i,2*domlo-j  ,k,n);
-            //     hi = -lo_arr(i,2*domlo-j-1,k,n);
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                lo = -Im(i,2*domlo-j  ,k,n);
+                hi = -Ip(i,2*domlo-j-1,k,n);
             }
         }
     }
@@ -209,22 +263,29 @@ void SetYBCs (const int i, const int j, const int k, const int n,
         }
         else if (bchi == BCType::reflect_even)
         {
-            hi = lo;
-
-            if ( j>domhi+1)
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_even BC. See comments in EBGodunovBC::SetBCs.");
-            // hi = lo_arr(i,2*(domhi+1)-j-1,k,n);
-            // lo = hi_arr(i,2*(domhi+1)-j  ,k,n);
+            if ( j == domhi+1 )
+            {
+                hi = lo;
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                hi =  Ip(i,2*(domhi+1)-j-1,k,n);
+                lo =  Im(i,2*(domhi+1)-j  ,k,n);
+            }
         }
         else if (bchi == BCType::reflect_odd)
         {
-            if ( j==domhi+1 ) {
+            if ( j == domhi+1 )
+            {
                 hi = Real(0.);
                 lo = Real(0.);
-            } else {
-                Abort("EBGodunovBC::SetBCs not yet fully implemented for reflect_odd BC. See comments in EBGodunovBC::SetBCs.");
-            //     hi = -lo_arr(i,2*(domhi+1)-j-1,k,n);
-            //     lo = -hi_arr(i,2*(domhi+1)-j  ,k,n);
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                hi = -Ip(i,2*(domhi+1)-j-1,k,n);
+                lo = -Im(i,2*(domhi+1)-j  ,k,n);
             }
         }
     }
@@ -236,6 +297,8 @@ void SetYBCs (const int i, const int j, const int k, const int n,
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 void SetZBCs (const int i, const int j, const int k, const int n,
               const amrex::Array4<const amrex::Real> &s,
+              const amrex::Array4<const amrex::Real> &Ip,
+              const amrex::Array4<const amrex::Real> &Im,
               amrex::Real &lo, amrex::Real &hi,
               amrex::Real velm, amrex::Real velp,
               const int bclo, const int bchi,
@@ -267,20 +330,30 @@ void SetZBCs (const int i, const int j, const int k, const int n,
         }
         else if (bclo == BCType::reflect_even)
         {
-            Abort("EBGodunovBC::SetBCs not yet implemented for reflect_even BC. See comments in EBGodunovBC::SetBCs.");
-            // lo = hi_arr(i,j,2*domlo-k  ,n);
-            // hi = lo_arr(i,j,2*domlo-k-1,n);
+            if ( k == domlo )
+            {
+                lo = hi;
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                lo =  Im(i,j,2*domlo-k  ,n);
+                hi =  Ip(i,j,2*domlo-k-1,n);
+            }
         }
         else if(bclo == BCType::reflect_odd)
         {
-            Abort("EBGodunovBC::SetBCs not yet implemented for reflect_odd BC. See comments in EBGodunovBC::SetBCs.");
-            // if ( k==domlo ) {
-            //     hi = Real(0.);
-            //     lo = Real(0.);
-            // } else {
-            //     lo = -hi_arr(i,j,2*domlo-k  ,n);
-            //     hi = -lo_arr(i,j,2*domlo-k-1,n);
-            // }
+            if ( k == domlo )
+            {
+                hi = Real(0.);
+                lo = Real(0.);
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                lo = -Im(i,j,2*domlo-k  ,n);
+                hi = -Ip(i,j,2*domlo-k-1,n);
+            }
         }
     }
     // High Z
@@ -305,20 +378,30 @@ void SetZBCs (const int i, const int j, const int k, const int n,
         }
         else if (bchi == BCType::reflect_even)
         {
-            Abort("EBGodunovBC::SetBCs not yet implemented for reflect_even BC. See comments in EBGodunovBC::SetBCs.");
-            // hi = lo_arr(i,j,2*(domhi+1)-k-1,n);
-            // lo = hi_arr(i,j,2*(domhi+1)-k  ,n);
+            if ( k == domhi+1 )
+            {
+                hi = lo;
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                hi =  Ip(i,j,2*(domhi+1)-k-1,n);
+                lo =  Im(i,j,2*(domhi+1)-k  ,n);
+            }
         }
         else if (bchi == BCType::reflect_odd)
         {
-            Abort("EBGodunovBC::SetBCs not yet implemented for reflect_odd BC. See comments in EBGodunovBC::SetBCs.");
-            // if ( k==domhi+1 ) {
-            //     hi = Real(0.);
-            //     lo = Real(0.);
-            // } else {
-            //     hi = -lo_arr(i,j,2*(domhi+1)-k-1,n);
-            //     lo = -hi_arr(i,j,2*(domhi+1)-k  ,n);
-            // }
+            if ( k == domhi+1 )
+            {
+                hi = Real(0.);
+                lo = Real(0.);
+            }
+            else
+            {
+                AMREX_ASSERT(Ip && Im);
+                hi = -Ip(i,j,2*(domhi+1)-k-1,n);
+                lo = -Im(i,j,2*(domhi+1)-k  ,n);
+            }
         }
     }
     else

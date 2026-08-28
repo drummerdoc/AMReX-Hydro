@@ -75,12 +75,21 @@ EBGodunov::ExtrapVelToFaces ( MultiFab const& vel,
             // In 3-d:
             // 12*ncomp are:  Imx, Ipx, Imy, Ipy, Imz, Ipz, xlo/xhi, ylo/yhi, zlo/zhi
             //  3       are:  u_ad, v_ad, w_ad
+            //  3*ncomp are:  xedge, yedge, zedge. These used to alias Imx/Imy/Imz,
+            //                but the reflecting BCs in EBGodunovBC::Set*BCs need the
+            //                PLM states in Imx/Imy/Imz to survive the kernel that
+            //                forms the upwinded edge state, so they get their own
+            //                space now. See hydro_ebgodunov_extrap_vel_to_faces_3D.cpp.
             //
             // This over-allots for EB regular boxes, which need grow(bx,1)
             // vs. grow(bx,2) here. EB needs the 2nd ghost cell for creating
             // the transverse terms and corner coupling.
             Box const& bxg2 = amrex::grow(bx,2);
+#if (AMREX_SPACEDIM == 3)
+            scratch.resize(bxg2, (5*ncomp + 1)*AMREX_SPACEDIM);
+#else
             scratch.resize(bxg2, (4*ncomp + 1)*AMREX_SPACEDIM);
+#endif
             Real* p  = scratch.dataPtr();
 
             AMREX_D_TERM(Box const& xbx = mfi.nodaltilebox(0);,
@@ -277,7 +286,7 @@ EBGodunov::ComputeAdvectiveVel ( AMREX_D_DECL(Box const& xbx,
             Real hi = Imx(i  ,j,k,n);
 
             const auto bc = HydroBC::getBC(i, j, k, n, domain, pbc, bc_arr);
-            EBGodunovBC::SetXBCs(i, j, k, n, vel, lo, hi, lo, hi,
+            EBGodunovBC::SetXBCs(i, j, k, n, vel, Ipx, Imx, lo, hi, lo, hi,
                                  bc.lo(0), bc.hi(0), dlo.x, dhi.x, true);
 
             Real st = ( (lo+hi) >= 0.) ? lo : hi;
@@ -298,7 +307,7 @@ EBGodunov::ComputeAdvectiveVel ( AMREX_D_DECL(Box const& xbx,
             Real hi = Imy(i,j  ,k,n);
 
             const auto bc = HydroBC::getBC(i, j, k, n, domain, pbc, bc_arr);
-            EBGodunovBC::SetYBCs(i, j, k, n, vel, lo, hi, lo, hi,
+            EBGodunovBC::SetYBCs(i, j, k, n, vel, Ipy, Imy, lo, hi, lo, hi,
                                  bc.lo(1), bc.hi(1), dlo.y, dhi.y, true);
 
             Real st = ( (lo+hi) >= 0.) ? lo : hi;
@@ -320,7 +329,7 @@ EBGodunov::ComputeAdvectiveVel ( AMREX_D_DECL(Box const& xbx,
             Real hi = Imz(i,j,k  ,n);
 
             const auto bc = HydroBC::getBC(i, j, k, n, domain, pbc, bc_arr);
-            EBGodunovBC::SetZBCs(i, j, k, n, vel, lo, hi, lo, hi,
+            EBGodunovBC::SetZBCs(i, j, k, n, vel, Ipz, Imz, lo, hi, lo, hi,
                                  bc.lo(2), bc.hi(2), dlo.z, dhi.z, true);
 
             Real st = ( (lo+hi) >= 0.) ? lo : hi;

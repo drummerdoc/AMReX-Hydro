@@ -68,6 +68,21 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
     Array4<Real> zlo = makeArray4(p, Box(zebx), ncomp);
     p += zlo.size();
     Array4<Real> zhi = makeArray4(p, Box(zebx), ncomp);
+    p += zhi.size();
+
+    // Dedicated storage for the upwinded intermediate edge states.
+    //
+    // These used to alias Imx/Imy/Imz. That made the kernel below write the
+    // edge state into the very arrays that EBGodunovBC::Set*BCs has to read,
+    // at other indices, to fill reflecting boundary conditions beyond the
+    // domain face -- an intra-kernel data race with no defined ordering on
+    // GPUs. Giving them their own space costs ncomp*AMREX_SPACEDIM extra
+    // components in the caller's scratch FAB and removes the dependence.
+    Array4<Real> xedge = makeArray4(p, Box(xebx), ncomp);
+    p += xedge.size();
+    Array4<Real> yedge = makeArray4(p, Box(yebx), ncomp);
+    p += yedge.size();
+    Array4<Real> zedge = makeArray4(p, Box(zebx), ncomp);
 
     amrex::ParallelFor(
         xebx, ncomp, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
@@ -77,7 +92,7 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
 
             const auto bc = HydroBC::getBC(i, j, k, n, domain, pbc, bc_arr);
 
-            EBGodunovBC::SetXBCs(i, j, k, n, q, lo, hi, u_ad(i,j,k), u_ad(i,j,k),
+            EBGodunovBC::SetXBCs(i, j, k, n, q, Ipx, Imx, lo, hi, u_ad(i,j,k), u_ad(i,j,k),
                                  bc.lo(0), bc.hi(0), dlo.x, dhi.x, true);
 
             xlo(i,j,k,n) = lo;
@@ -86,7 +101,7 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
             Real uad = u_ad(i,j,k);
             Real st = (uad >= 0.) ? lo : hi;
             Real fu = (amrex::Math::abs(uad) < small_vel) ? Real(0.0) : Real(1.0);
-            Imx(i, j, k, n) = fu*st + (Real(1.0) - fu) * Real(0.5) * (hi + lo); // store xedge
+            xedge(i, j, k, n) = fu*st + (Real(1.0) - fu) * Real(0.5) * (hi + lo); // store xedge
         },
         yebx, ncomp, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
         {
@@ -95,7 +110,7 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
 
             const auto bc = HydroBC::getBC(i, j, k, n, domain, pbc, bc_arr);
 
-            EBGodunovBC::SetYBCs(i, j, k, n, q, lo, hi, v_ad(i,j,k), v_ad(i,j,k),
+            EBGodunovBC::SetYBCs(i, j, k, n, q, Ipy, Imy, lo, hi, v_ad(i,j,k), v_ad(i,j,k),
                                  bc.lo(1), bc.hi(1), dlo.y, dhi.y, true);
 
             ylo(i,j,k,n) = lo;
@@ -104,7 +119,7 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
             Real vad = v_ad(i,j,k);
             Real st = (vad >= 0.) ? lo : hi;
             Real fu = (amrex::Math::abs(vad) < small_vel) ? Real(0.0) : Real(1.0);
-            Imy(i, j, k, n) = fu*st + (Real(1.0) - fu)*Real(0.5)*(hi + lo); // store yedge
+            yedge(i, j, k, n) = fu*st + (Real(1.0) - fu)*Real(0.5)*(hi + lo); // store yedge
         },
         zebx, ncomp, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
         {
@@ -113,7 +128,7 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
 
             const auto bc = HydroBC::getBC(i, j, k, n, domain, pbc, bc_arr);
 
-            EBGodunovBC::SetZBCs(i, j, k, n, q, lo, hi, w_ad(i,j,k), w_ad(i,j,k),
+            EBGodunovBC::SetZBCs(i, j, k, n, q, Ipz, Imz, lo, hi, w_ad(i,j,k), w_ad(i,j,k),
                                  bc.lo(2), bc.hi(2), dlo.z, dhi.z, true);
 
             zlo(i,j,k,n) = lo;
@@ -122,7 +137,7 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
             Real wad = w_ad(i,j,k);
             Real st = (wad >= 0.) ? lo : hi;
             Real fu = (amrex::Math::abs(wad) < small_vel) ? Real(0.0) : Real(1.0);
-            Imz(i, j, k, n) = fu*st + (Real(1.0) - fu)*Real(0.5)*(hi + lo); // store zedge
+            zedge(i, j, k, n) = fu*st + (Real(1.0) - fu)*Real(0.5)*(hi + lo); // store zedge
         });
 
     // Recall that divU (at cell-centers) is only used in corner coupling for conservative
@@ -135,9 +150,6 @@ EBGodunov::ExtrapVelToFacesOnBox ( Box const& bx, int ncomp,
     });
 
     // We can reuse the space in Ipy and Ipz.
-    Array4<Real> xedge = Imx;
-    Array4<Real> yedge = Imy;
-    Array4<Real> zedge = Imz;
 
     //
     // X-Flux
